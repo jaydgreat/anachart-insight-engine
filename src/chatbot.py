@@ -21,11 +21,11 @@ THE RAG PATTERN, made concrete:
    aren't in the JSON. This is what prevents hallucinated statistics.
 """
 import json
+import os
 import requests
+import pandas as pd
 import streamlit as st
 from anthropic import Anthropic
-
-import os
 
 API_BASE = os.environ.get("API_BASE", "http://127.0.0.1:8000")
 MODEL = "claude-sonnet-5"
@@ -36,6 +36,59 @@ st.set_page_config(page_title="AnaChart Insight Chatbot", page_icon="📈")
 st.title("📈 AnaChart Insight Chatbot")
 st.caption("Ask about any analyst's price target -- e.g. "
            "\"How realistic is Gene Munster's $380 target on Apple?\"")
+
+# --- Load the known ticker/analyst universe once, for the sidebar picker ---
+@st.cache_data
+def load_ticker_analyst_lists():
+    df = pd.read_csv("model_ready_data.csv", usecols=["ticker", "analyst_name"])
+    tickers = sorted(df["ticker"].unique())
+    # ticker -> sorted list of analysts who have actually covered it
+    ticker_to_analysts = {
+        t: sorted(df.loc[df["ticker"] == t, "analyst_name"].unique())
+        for t in tickers
+    }
+    return tickers, ticker_to_analysts
+
+TICKERS, TICKER_TO_ANALYSTS = load_ticker_analyst_lists()
+
+@st.cache_data
+def compute_leaderboard(min_resolved_calls: int = 5):
+    """Rank analysts by their hit rate, using each row's own leakage-safe
+    hit rate feature (already shrinkage-adjusted) at their MOST RECENT
+    call -- this reflects each analyst's full track record to date."""
+    df = pd.read_csv(
+        "model_ready_data.csv",
+        usecols=["analyst_name", "ticker", "call_date", "analyst_hit_rate", "analyst_n_prior_resolved"],
+        parse_dates=["call_date"],
+    )
+    tickers_covered = df.groupby("analyst_name")["ticker"].nunique()
+
+    latest = df.sort_values("call_date").groupby("analyst_name").last().reset_index()
+    latest = latest[latest["analyst_n_prior_resolved"] >= min_resolved_calls]
+    latest["tickers_covered"] = latest["analyst_name"].map(tickers_covered)
+
+    latest = latest.rename(columns={
+        "analyst_name": "Analyst",
+        "analyst_hit_rate": "Hit rate",
+        "analyst_n_prior_resolved": "Resolved calls",
+        "tickers_covered": "Tickers covered",
+    })
+    latest["Hit rate"] = (latest["Hit rate"] * 100).round(1)
+    return latest[["Analyst", "Hit rate", "Resolved calls", "Tickers covered"]].sort_values(
+        "Hit rate", ascending=False
+    ).reset_index(drop=True)
+
+with st.sidebar:
+    st.header("Quick Lookup")
+    st.caption("Pick from real tickers/analysts in the dataset -- guarantees a match.")
+    picked_ticker = st.selectbox("Ticker", TICKERS)
+    picked_analyst = st.selectbox("Analyst", TICKER_TO_ANALYSTS[picked_ticker])
+    picked_rating = st.radio("Rating", ["BULLISH", "BEARISH"], horizontal=True)
+    picked_target = st.number_input("Price target ($)", min_value=0.0, value=100.0, step=1.0)
+    run_lookup = st.button("Ask about this call", type="primary")
+
+    st.divider()
+    show_leaderboard = st.checkbox("Show analyst leaderboard")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -101,6 +154,22 @@ def call_predict_api(params: dict) -> dict:
         return {"error": f"API returned an error: {e.response.text}"}
 
 
+def show_price_trend(ticker: str, price_target: float = None):
+    """Fetch and render a trend line for the ticker, with an optional
+    horizontal reference line marking the analyst's price target."""
+    try:
+        resp = requests.get(f"{API_BASE}/price_history/{ticker}", params={"days": 180}, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.exceptions.RequestException:
+        return  # silently skip the chart if unavailable -- not critical to the answer
+
+    chart_df = pd.DataFrame({"close": data["close"]}, index=pd.to_datetime(data["dates"]))
+    if price_target:
+        chart_df["target"] = price_target
+    st.line_chart(chart_df, height=220)
+
+
 def generate_grounded_answer(user_question: str, model_result: dict) -> str:
     grounding_message = (
         f"User's question: {user_question}\n\n"
@@ -116,9 +185,40 @@ def generate_grounded_answer(user_question: str, model_result: dict) -> str:
 
 
 # --- Chat UI ---------------------------------------------------------
+if show_leaderboard:
+    st.subheader("Analyst leaderboard")
+    st.caption("Ranked by historical hit rate. Minimum 5 resolved calls, to avoid small-sample noise.")
+    st.dataframe(compute_leaderboard(min_resolved_calls=5), hide_index=True, use_container_width=True)
+    st.divider()
+
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
+
+# Sidebar "Quick Lookup" button: we already have exact, guaranteed-valid
+# values from the dropdowns, so skip the free-text extraction step
+# entirely and go straight to RETRIEVE -> GENERATE. More reliable than
+# parsing free text, since there's no ambiguity to get wrong.
+if run_lookup:
+    synthetic_question = (
+        f"How realistic is {picked_analyst}'s ${picked_target:.0f} "
+        f"{picked_rating.lower()} target on {picked_ticker}?"
+    )
+    st.session_state.messages.append({"role": "user", "content": synthetic_question})
+    with st.chat_message("user"):
+        st.write(synthetic_question)
+    with st.chat_message("assistant"):
+        params = {
+            "ticker": picked_ticker, "analyst_name": picked_analyst,
+            "price_target": picked_target, "rating": picked_rating,
+        }
+        with st.spinner(f"Looking up {picked_ticker}..."):
+            model_result = call_predict_api(params)
+        with st.spinner("Composing answer..."):
+            answer = generate_grounded_answer(synthetic_question, model_result)
+        st.write(answer)
+        show_price_trend(picked_ticker, picked_target)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
 
 if user_question := st.chat_input("Ask about an analyst's price target..."):
     st.session_state.messages.append({"role": "user", "content": user_question})
@@ -141,4 +241,6 @@ if user_question := st.chat_input("Ask about an analyst's price target..."):
                 answer = generate_grounded_answer(user_question, model_result)
 
         st.write(answer)
+        if not params.get("needs_clarification"):
+            show_price_trend(params["ticker"], params.get("price_target"))
         st.session_state.messages.append({"role": "assistant", "content": answer})
