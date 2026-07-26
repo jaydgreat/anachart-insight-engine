@@ -1,0 +1,36 @@
+# Orchestrates the API and chatbot together.
+#
+# Usage:
+#   export ANTHROPIC_API_KEY=your_key_here
+#   docker-compose up --build
+#
+# The chatbot depends on the API being reachable, which is why we use
+# Docker's internal service networking (http://api:8000) instead of
+# localhost inside the container.
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chatbot:
+    build:
+      context: .
+      dockerfile: Dockerfile.chatbot
+    ports:
+      - "8501:8501"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - API_BASE=http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy

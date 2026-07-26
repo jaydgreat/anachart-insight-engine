@@ -1,0 +1,18 @@
+# Dockerfile for the FastAPI inference service (api.py)
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Code, trained models, and data needed at runtime
+COPY src/api.py .
+COPY src/xgb_target_hit_model_tuned.json .
+COPY src/hazard_model.json .
+COPY src/model_ready_data.csv .
+COPY data/nasdaq100_prices.csv /data/nasdaq100_prices.csv
+
+EXPOSE 8000
+
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,15 @@
+# Dockerfile for the Streamlit chatbot (chatbot.py)
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/chatbot.py .
+
+EXPOSE 8501
+
+# ANTHROPIC_API_KEY is passed in at runtime (docker run -e or docker-compose
+# env_file), never baked into the image.
+CMD ["streamlit", "run", "chatbot.py", "--server.address=0.0.0.0", "--server.port=8501"]
