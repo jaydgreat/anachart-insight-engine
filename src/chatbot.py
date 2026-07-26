@@ -30,6 +30,14 @@ from anthropic import Anthropic
 API_BASE = os.environ.get("API_BASE", "http://127.0.0.1:8000")
 MODEL = "claude-sonnet-5"
 
+# Resolve data file paths relative to THIS SCRIPT's location, not the
+# current working directory -- Streamlit Cloud runs apps from the repo
+# root regardless of where the main file lives, so a bare relative path
+# like "model_ready_data.csv" breaks there even though it works when you
+# run `streamlit run chatbot.py` locally from inside src/.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DATA_PATH = os.path.join(SCRIPT_DIR, "model_ready_data.csv")
+
 client = Anthropic()  # reads ANTHROPIC_API_KEY from the environment
 
 st.set_page_config(page_title="AnaChart Insight Chatbot", page_icon="📈")
@@ -40,7 +48,7 @@ st.caption("Ask about any analyst's price target -- e.g. "
 # --- Load the known ticker/analyst universe once, for the sidebar picker ---
 @st.cache_data
 def load_ticker_analyst_lists():
-    df = pd.read_csv("model_ready_data.csv", usecols=["ticker", "analyst_name"])
+    df = pd.read_csv(MODEL_DATA_PATH, usecols=["ticker", "analyst_name"])
     tickers = sorted(df["ticker"].unique())
     # ticker -> sorted list of analysts who have actually covered it
     ticker_to_analysts = {
@@ -57,7 +65,7 @@ def compute_leaderboard(min_resolved_calls: int = 5):
     hit rate feature (already shrinkage-adjusted) at their MOST RECENT
     call -- this reflects each analyst's full track record to date."""
     df = pd.read_csv(
-        "model_ready_data.csv",
+        MODEL_DATA_PATH,
         usecols=["analyst_name", "ticker", "call_date", "analyst_hit_rate", "analyst_n_prior_resolved"],
         parse_dates=["call_date"],
     )
